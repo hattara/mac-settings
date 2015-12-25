@@ -1,0 +1,321 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use Data::Dumper;
+
+## Routing
+my ($type, @option) = @ARGV;
+
+if (! $type) {
+    error_msg_and_die("type_error");
+
+} elsif ($type eq "co" || $type eq "checkout") {
+    checkout(\@option);
+
+} elsif ($type eq "wip") {
+    commit_empty(\@option);
+    ps(\@option);
+
+} elsif ($type eq "cm" || $type eq "commit") {
+    commit(\@option);
+
+} elsif ($type eq "ps" || $type eq "push") {
+    ps(\@option);
+
+} elsif ($type eq 'cp' || $type eq 'commitpush') {
+    commitpush(\@option);
+
+} elsif ($type eq 'm' || $type eq 'merge') {
+    merge();
+
+} elsif ($type eq 'p' || $type eq 'pull') {
+    pull();
+
+} elsif ($type eq 'bdl' || $type eq 'branchdellocal') {
+    branchdellocal();
+
+} elsif ($type eq 'bd' || $type eq 'branchdel') {
+    branchdel();
+
+} elsif (my $command = is_default_git($type)) {
+    default_git($command, \@option);
+
+} elsif ($type eq 'help' || $type eq '-h' || $type eq '--help') {
+    help_view();
+
+} else {
+    error_msg_and_die("type_error");
+}
+
+
+## Config
+sub config {
+    return {
+        default_git_commands => {
+            s       => 'status', 
+            st      => 'status',
+            status  => 'status',
+            d       => 'diff',
+            diff    => 'diff',
+            b       => 'branch',
+            branch  => 'branch',
+            a       => 'add',
+            add     => 'add',
+        },
+        messages => {
+            type_error                      => "利用できないタイプです。gitコマンドをご利用ください。\n\n",
+            checkout_option_num_error       => "オプションの指定数が正しくありません。指定は最大1個(作成ブランチ名)です。\n\n",
+            cannot_exec_git                 => "gitコマンドの実行でエラーが発生しました : %s \n\n",
+            cannot_selectable_branch_number => "存在しないbranch番号が選択されました。\n\n",
+        },
+    };
+}
+
+
+## Controller
+sub checkout {
+    my $option = shift;
+    #my $func_name = (caller 0)[3];
+    #$func_name =~ s/.*:://g;
+
+    ## remote reposからbranch生成する機会が少ないので、とりあえず1個の場合のみ
+    if (scalar @$option == 1) {
+        my @options = @$option;
+        unshift(@options, '-b');
+        exec_git('checkout', \@options);
+    } elsif (scalar @$option == 0) {
+        my $result = exec_git('branch');
+        my $branch_name = select_branch_view($result);
+        exec_git('checkout', [$branch_name]);
+    } else {
+        error_msg_and_die("checkout_option_num_error");
+    }
+    return;
+}
+
+sub commit {
+    my $option = shift;
+    my $commit_msg = $option->[0];
+    my $commit_res = exec_git('commit', ['-m', $commit_msg]);
+    default_view($commit_res);
+    return;
+}
+
+sub commit_empty {
+    my $option = shift;
+    my $commit_msg = $option->[0];
+    my $commit_res = exec_git('commit', ['--allow-empty', '-m', '[WIP] ' . $commit_msg]);
+    default_view($commit_res);
+    return;
+}
+
+# pushにしたいけど、重複するのでpsに
+sub ps {
+    my $option = shift;
+    my $prefix = get_prefix();
+    my $push_res = exec_git('push', ['origin', $prefix->{branch_name}]);
+    default_view($push_res);
+    return;
+}
+
+sub commitpush {
+    my $option = shift;
+    my $prefix = get_prefix();
+
+    my $commit_msg;
+    if ($prefix->{branch_name} eq 'master') {
+        $commit_msg = $option->[0];
+    } else {
+        $commit_msg = sprintf('#%d : %s / %s', $prefix->{ticket_id}, $prefix->{task_name}, join(',', @$option));
+    }
+    my $commit_res = exec_git('commit', ['-m', $commit_msg]);
+    default_view($commit_res);
+
+    my $push_res = exec_git('push', ['origin', $prefix->{branch_name}]);
+    default_view($push_res);
+
+    return;
+}
+
+sub merge {
+    my $option = shift;
+    my $result = exec_git('branch');
+    my $branch_name = select_branch_view($result);
+    exec_git('merge', [$branch_name]);
+    return;
+}
+
+sub pull {
+    my $option = shift;
+    my $prefix = get_prefix();
+    my $push_res = exec_git('pull', ['origin', $prefix->{branch_name}]);
+    default_view($push_res);
+    return;
+}
+
+sub branchdellocal {
+    my $result = exec_git('branch');
+    my $branch_name = select_branch_view($result);
+    exec_git('branch', ['-d', $branch_name]);
+    return;
+}
+
+sub branchdel {
+    my $result = exec_git('branch');
+    my $branch_name = select_branch_view($result);
+    exec_git('branch', ['-d', $branch_name]);
+    exec_git('push', ['origin', ":" . $branch_name]);
+    return;
+}
+
+sub default_git {
+    my ($command, $option) = @_;
+    my $result = exec_git($command, $option);
+    default_view($result);
+    return;
+}
+
+
+
+## View
+sub default_view {
+    my $result = shift;
+
+    print "\n";
+    print $_ for @$result;
+    print "\n";
+    return;
+}
+
+sub select_branch_view {
+    my $branches = shift;
+    print "---------- please choise -------------\n";
+    my $count = 0;
+    for (@$branches) {
+        chomp;
+        $_ =~ s/^(\* ||  )//g;
+        print sprintf("%d) %s \n", $count, $_);
+        $count++;
+    }
+    print "--------------------------------------\n";
+    print "please input number: ";
+
+    my $choose_number = <STDIN>;
+    error_msg_and_die("cannot_selectable_branch_number") unless ($choose_number >= 0 && $choose_number <= ($count - 1));
+
+    return @{$branches}[$choose_number];
+}
+
+sub help_view {
+    print<<"EOL";
+
+        git-wrapper(ギットラッパー)の使い方は、
+
+            ・新規ブランチ生成, 切り替え(git checkout -b <branch-name>同等)
+                git-wrapper (co||checkout) <new-branch-name>
+
+            ・ブランチ切り替え(git checkout <branch-name>同等)
+                git-wrapper (co||checkout)
+                (変更後ブランチ名は、コマンド実行後に選択式です)
+
+            ・コミット(git commit -m <comment>)
+                git-wrapper cm <comment>
+
+            ・プッシュ(git push origin <branch-name>)
+                git-wrapper ps
+
+            ・コミット&プッシュ(git commit -m <comment> & git push origin <branch-name>同等)
+                git-wrapper (cp||commitpush) <comment>
+
+            ・マージ(git merge <branch-name>同等)
+                git-wrapper (m||merge)
+                (マージ元ブランチ名は、コマンド実行後に選択式です)
+
+            ・remoteリポジトリからのプル(git pull origin <branch-name>同等)
+                git-wrapper (p||pull)
+
+            ・ローカルブランチの削除
+                git-wrapper (bdl || branchdellocal)
+                (削除ブランチ名は、コマンド実行後に選択式です)
+
+            ・ブランチの削除
+                git-wrapper (bd||branchdel)
+                (削除ブランチ名は、コマンド実行後に選択式です)
+
+            ------ default git -------
+            ・ブランチ一覧表示(git branch同等)
+                git-wrapper (b||branch))
+
+            ・ステータス(git status同等)
+                git-wrapper (s||st||status)
+
+            ・差分チェック(git diff同等)
+                git-wrapper (d||diff)
+
+            ・変更のadd(git add <file>同等)
+                git-wrapper (a||add) <file>
+
+#            ・変更内容の確認とadd (git diff <filename> && git add <filename>)
+
+        aliasなどで、 alias gt="git-wrapper" とかしてもらうとタイプ数減りますね
+EOL
+    return;
+}
+
+## Model
+sub error_msg_and_die {
+    my ($type, @errors) = @_;
+    die sprintf(config->{messages}->{$type}, join(',', @errors));
+    return;
+}
+
+sub exec_git {
+    my ($command, $option) = @_;
+    my $param = '';
+    if ($option) {
+        for (@$option) {
+            chomp;
+            $param .= ($_ =~ m/^\-/ || $command ne 'commit')? $_ . ' ': '"' . $_ . '"';
+        }
+    }
+    my @result;
+    eval {
+        @result = `git $command $param`;
+    };
+    error_msg_and_die("cannot_exec_git", $@) if $@;
+
+    return \@result;
+}
+
+sub is_default_git {
+    my $type = shift;
+    my $default_git_commands = config->{default_git_commands};
+    my @default_git_commands_key = keys %$default_git_commands;
+
+    my $command;
+    for (@default_git_commands_key) {
+        chomp;
+        if ($type eq $_) {
+            $command = $default_git_commands->{$type};
+            last;
+        }
+    }
+
+    return $command;
+}
+
+sub get_prefix {
+    #my ($status) = `git status`;
+    my ($status) = @{exec_git('status')};
+    #(undef, undef, my $branch_name) = split(/ /, $status);
+    (undef, undef, undef, my $branch_name) = split(/ /, $status);
+    chomp $branch_name;
+    my ($id, $name) = ($branch_name eq 'master')? ('', ''): split(/_/, $branch_name, 2);
+
+    return {
+        ticket_id => $id,
+        task_name => $name,
+        branch_name => $branch_name,
+    };
+}
